@@ -18,7 +18,7 @@
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="wifitrackerlib_summary_separator" msgid="6613897475167609815">" / "</string>
     <string name="wifitrackerlib_checking_for_internet_access" msgid="4787495471423429472">"ଇଣ୍ଟରନେଟ ଆକ୍ସେସ ପାଇଁ ଯାଞ୍ଚ କରାଯାଉଛି..."</string>
-    <string name="wifitrackerlib_auto_connect_disable" msgid="4714835547164460651">"ସ୍ୱତଃ-ସଂଯୋଗ ବନ୍ଦ ଅଛି"</string>
+    <string name="wifitrackerlib_auto_connect_disable" msgid="4714835547164460651">"ସ୍ୱତଃ-କନେକ୍ଟ ବନ୍ଦ ଅଛି"</string>
     <string name="wifitrackerlib_saved_network" msgid="5353460010746484376">"<xliff:g id="NAME">%1$s</xliff:g> ଦ୍ୱାରା ସେଭ୍ କରାଯାଇଛି"</string>
     <string name="wifitrackerlib_wifi_no_internet" msgid="4998563744669636949">"କୌଣସି ଇଣ୍ଟର୍ନେଟ୍ ଆକ୍ସେସ୍ ନାହିଁ"</string>
     <string name="wifitrackerlib_wifi_disabled_password_failure" msgid="2850244218754633550">"ପ୍ରାମାଣିକତା ସମସ୍ୟା"</string>
@@ -33,7 +33,7 @@
     <string name="wifitrackerlib_wifi_mbo_assoc_disallowed_max_num_sta_associated" msgid="4418848919914618807">"ନେଟୱାର୍କ କ୍ଷମତାର ସର୍ବାଧିକ ସୀମାରେ ପହଞ୍ଚିଯାଇଛି। ପରେ ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ।"</string>
     <string name="wifitrackerlib_wifi_mbo_assoc_disallowed_cannot_connect" msgid="2692286425448897083">"ସଂଯୋଗ କରାଯାଇପାରିବ ନାହିଁ। ପରେ ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ।"</string>
     <string name="wifitrackerlib_wifi_network_not_found" msgid="1308764769892463388">"ସଂଯୋଗ କରାଯାଇପାରିବ ନାହିଁ। ପରେ ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ।"</string>
-    <string name="wifitrackerlib_wifi_disconnected" msgid="3320414360982942679">"ବିଚ୍ଛିନ୍ନ କରାଯାଇଛି"</string>
+    <string name="wifitrackerlib_wifi_disconnected" msgid="3320414360982942679">"ଡିସକନେକ୍ଟ କରାଯାଇଛି"</string>
     <string name="wifitrackerlib_wifi_remembered" msgid="2406091442008343041">"ସେଭ କରାଯାଇଛି"</string>
     <string name="wifitrackerlib_wifi_metered_label" msgid="8818508951778620385">"ମିଟର ହୋଇଥିବା"</string>
     <string name="wifitrackerlib_wifi_unmetered_label" msgid="1902150402929678469">"ମିଟର ହୋଇନଥିବା"</string>

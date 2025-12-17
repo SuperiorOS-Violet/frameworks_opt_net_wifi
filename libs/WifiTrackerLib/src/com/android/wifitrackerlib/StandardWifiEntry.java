@@ -46,6 +46,7 @@ import static com.android.wifitrackerlib.Utils.getSingleSecurityTypeFromMultiple
 import static com.android.wifitrackerlib.Utils.getVerboseSummary;
 
 import android.annotation.SuppressLint;
+import android.app.ActivityManager;
 import android.app.admin.DevicePolicyManager;
 import android.app.admin.WifiSsidPolicy;
 import android.net.ConnectivityManager;
@@ -73,6 +74,7 @@ import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import androidx.annotation.WorkerThread;
 import androidx.core.os.BuildCompat;
 
@@ -99,6 +101,14 @@ import java.util.stream.Collectors;
 public class StandardWifiEntry extends WifiEntry {
     static final String TAG = "StandardWifiEntry";
     public static final String KEY_PREFIX = "StandardWifiEntry:";
+
+    /**
+     * Time after a user disconnection for a network to be considered "recently disconnected".
+     * This is used to display the WifiEntry as in-range after a disconnection if there are no
+     * scan results yet.
+     */
+    @VisibleForTesting
+    static final long USER_RECENTLY_DISCONNECTED_TIMEOUT_MS = 10_000;
 
     @NonNull private final StandardWifiEntryKey mKey;
 
@@ -130,6 +140,9 @@ public class StandardWifiEntry extends WifiEntry {
 
     private final UserManager mUserManager;
     private final DevicePolicyManager mDevicePolicyManager;
+
+    // Last user disconnect timestamp in milliseconds.
+    private long mLastUserDisconnectTimestampMs = Long.MIN_VALUE;
 
     StandardWifiEntry(
             @NonNull WifiTrackerInjector injector,
@@ -189,8 +202,19 @@ public class StandardWifiEntry extends WifiEntry {
         final @ConnectedState int connectedState = getConnectedState();
         switch (connectedState) {
             case CONNECTED_STATE_DISCONNECTED:
+                // Don't display the TDI error message if we can connect with SAE/OWE.
+                WifiConfiguration configToDescribe = mTargetWifiConfig;
+                if (configToDescribe != null && configToDescribe.getNetworkSelectionStatus()
+                        .getNetworkSelectionDisableReason()
+                        == Utils.DISABLED_TRANSITION_DISABLE_INDICATION) {
+                    for (int upgradeType : List.of(SECURITY_TYPE_SAE, SECURITY_TYPE_OWE)) {
+                        if (!mMatchingScanResults.containsKey(upgradeType)) continue;
+                        if (!mMatchingWifiConfigs.containsKey(upgradeType)) continue;
+                        configToDescribe = mMatchingWifiConfigs.get(upgradeType);
+                    }
+                }
                 connectedStateDescription = getDisconnectedDescription(mInjector, mContext,
-                        mTargetWifiConfig,
+                        configToDescribe,
                         mForSavedNetworksPage,
                         concise);
                 break;
@@ -307,8 +331,18 @@ public class StandardWifiEntry extends WifiEntry {
 
     @Override
     public synchronized boolean canConnect() {
-        if (mScanResultLevel == WIFI_LEVEL_UNREACHABLE
-                || getConnectedState() != CONNECTED_STATE_DISCONNECTED) {
+        // Check if the entry is in range.
+        if (mScanResultLevel == WIFI_LEVEL_UNREACHABLE) {
+            // User may have disconnected before we have any scan results. Make sure we return false
+            // only if the network isn't recently disconnected.
+            long now = mInjector.getClock().millis();
+            if (now >= mLastUserDisconnectTimestampMs + USER_RECENTLY_DISCONNECTED_TIMEOUT_MS) {
+                return false;
+            }
+        }
+
+        // Cannot connect if we're already connected/connecting
+        if (getConnectedState() != CONNECTED_STATE_DISCONNECTED) {
             return false;
         }
 
@@ -342,6 +376,12 @@ public class StandardWifiEntry extends WifiEntry {
 
     @Override
     public synchronized void connect(@Nullable ConnectCallback callback) {
+        connect(callback, mContext.getResources()
+                .getBoolean(R.bool.wifitrackerlib_config_saveOpenNetworksAsShared));
+    }
+
+    @Override
+    public synchronized void connect(@Nullable ConnectCallback callback, boolean sharedOnCreation) {
         mConnectCallback = callback;
         // We should flag this network to auto-open captive portal since this method represents
         // the user manually connecting to a network (i.e. not auto-join).
@@ -359,34 +399,36 @@ public class StandardWifiEntry extends WifiEntry {
             }
             // Saved/suggested network
             mWifiManager.connect(mTargetWifiConfig.networkId, new ConnectActionListener());
-        } else {
-            if (mTargetSecurityTypes.contains(SECURITY_TYPE_OWE)) {
-                // OWE network
-                final WifiConfiguration oweConfig = new WifiConfiguration();
-                oweConfig.SSID = "\"" + mKey.getScanResultKey().getSsid() + "\"";
-                oweConfig.setSecurityParams(WifiConfiguration.SECURITY_TYPE_OWE);
-                mWifiManager.connect(oweConfig, new ConnectActionListener());
-                if (mTargetSecurityTypes.contains(SECURITY_TYPE_OPEN)) {
-                    // Add an extra Open config for OWE transition networks
-                    final WifiConfiguration openConfig = new WifiConfiguration();
-                    openConfig.SSID = "\"" + mKey.getScanResultKey().getSsid() + "\"";
-                    openConfig.setSecurityParams(WifiConfiguration.SECURITY_TYPE_OPEN);
-                    mWifiManager.save(openConfig, null);
-                }
-            } else if (mTargetSecurityTypes.contains(SECURITY_TYPE_OPEN)) {
-                // Open network
-                final WifiConfiguration openConfig = new WifiConfiguration();
-                openConfig.SSID = "\"" + mKey.getScanResultKey().getSsid() + "\"";
-                openConfig.setSecurityParams(WifiConfiguration.SECURITY_TYPE_OPEN);
-                mWifiManager.connect(openConfig, new ConnectActionListener());
-            } else {
-                // Secure network
-                if (callback != null) {
-                    mCallbackHandler.post(() ->
-                            callback.onConnectResult(
-                                    ConnectCallback.CONNECT_STATUS_FAILURE_NO_CONFIG));
-                }
+            return;
+        }
+
+        // Unsaved OWE network -- connect with a new config.
+        final WifiConfiguration openConfig = new WifiConfiguration();
+        openConfig.SSID = "\"" + mKey.getScanResultKey().getSsid() + "\"";
+        openConfig.setSecurityParams(WifiConfiguration.SECURITY_TYPE_OPEN);
+        openConfig.shared = sharedOnCreation;
+        if (mTargetSecurityTypes.contains(SECURITY_TYPE_OWE)) {
+            final WifiConfiguration oweConfig = new WifiConfiguration(openConfig);
+            oweConfig.setSecurityParams(WifiConfiguration.SECURITY_TYPE_OWE);
+            mWifiManager.connect(oweConfig, new ConnectActionListener());
+            if (mTargetSecurityTypes.contains(SECURITY_TYPE_OPEN)) {
+                // Add an extra Open config for OWE transition networks
+                mWifiManager.save(openConfig, null);
             }
+            return;
+        }
+
+        // Unsaved Open network -- connect with a new config.
+        if (mTargetSecurityTypes.contains(SECURITY_TYPE_OPEN)) {
+            mWifiManager.connect(openConfig, new ConnectActionListener());
+            return;
+        }
+
+        // Unsaved secure network -- signal to the caller that they must add the network manually.
+        if (callback != null) {
+            mCallbackHandler.post(() ->
+                    callback.onConnectResult(
+                            ConnectCallback.CONNECT_STATUS_FAILURE_NO_CONFIG));
         }
     }
 
@@ -408,6 +450,7 @@ public class StandardWifiEntry extends WifiEntry {
             }, 10_000 /* delayMillis */);
             mWifiManager.disableEphemeralNetwork("\"" + mKey.getScanResultKey().getSsid() + "\"");
             mWifiManager.disconnect();
+            mLastUserDisconnectTimestampMs = mInjector.getClock().millis();
         }
     }
 
@@ -657,6 +700,80 @@ public class StandardWifiEntry extends WifiEntry {
         }
 
         return false;
+    }
+
+    /**
+     * Returns true if this network is owned by the current user.
+     */
+    public boolean isOwnedByCurrentUser() {
+        return (isSaved() || isSuggestion()) && mKey.getConfigOwner()
+                .equals(UserHandle.of(ActivityManager.getCurrentUser()));
+    }
+
+    /**
+     * Returns true if this network is shared with other users.
+     */
+    public boolean isSharedWithOtherUsers() {
+        WifiConfiguration config = getWifiConfiguration();
+        if (config == null) return false;
+
+        return config.shared;
+    }
+
+    /**
+     * Sets whether this network is shared with other users.
+     */
+    public synchronized void setSharedWithOtherUsers(boolean shared) {
+        if (getWifiConfiguration() == null) return;
+
+        // Refresh the current config so we don't overwrite any changes that we haven't gotten
+        // the CONFIGURED_NETWORKS_CHANGED broadcast for yet.
+        refreshTargetWifiConfig();
+
+        if (mTargetWifiConfig.shared == shared) return;
+
+        int originalNetId = mTargetWifiConfig.networkId;
+        WifiConfiguration newConfig = new WifiConfiguration(mTargetWifiConfig);
+        newConfig.shared = shared;
+        newConfig.networkId = WifiConfiguration.INVALID_NETWORK_ID;
+
+        // Note: WifiManager.ActionListener runs on the Main thread.
+        mWifiManager.save(newConfig, new WifiManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                mWifiManager.forget(originalNetId, null /* listener */);
+            }
+
+            @Override
+            public void onFailure(int reason) {
+                Log.e(TAG, "setSharedWithOtherUsers: save failed with reason " + reason);
+            }
+        });
+    }
+
+    /**
+     * Returns true if this network is modifiable by other users.
+     */
+    public boolean isModifiableByOtherUsers() {
+        // Legacy behavior always allowed other uses to modify.
+        if (!NonSdkApiWrapper.isMultiUserWifiEnhancementEnabled()) return true;
+
+        WifiConfiguration config = getWifiConfiguration();
+        if (config == null) return false;
+        return config.isAllowedToUpdateByOtherUsers();
+    }
+
+    /**
+     * Sets whether this network is modifiable by other users.
+     */
+    public synchronized void setModifiableByOtherUsers(boolean modifiable) {
+        if (mTargetWifiConfig == null) return;
+
+        // Refresh the current config so we don't overwrite any changes that we haven't gotten
+        // the CONFIGURED_NETWORKS_CHANGED broadcast for yet.
+        refreshTargetWifiConfig();
+        mTargetWifiConfig.setAllowedToUpdateByOtherUsers(modifiable);
+        mWifiManager.save(mTargetWifiConfig, null /* listener */);
     }
 
     @WorkerThread
@@ -1047,32 +1164,51 @@ public class StandardWifiEntry extends WifiEntry {
      *     3) Is network request or not
      *     4) Should prioritize configuring a new network (i.e. target the security type of an
      *     in-range unsaved network, rather than a config that has no scans)
+     *     5) User that owns the config. If the network is unsaved, this will be the current user.
      */
     static class StandardWifiEntryKey {
         private static final String KEY_SCAN_RESULT_KEY = "SCAN_RESULT_KEY";
         private static final String KEY_SUGGESTION_PROFILE_KEY = "SUGGESTION_PROFILE_KEY";
         private static final String KEY_IS_NETWORK_REQUEST = "IS_NETWORK_REQUEST";
         private static final String KEY_IS_TARGETING_NEW_NETWORKS = "IS_TARGETING_NEW_NETWORKS";
+        private static final String KEY_CONFIG_OWNER = "CONFIG_OWNER";
 
         @NonNull private ScanResultKey mScanResultKey;
         @Nullable private String mSuggestionProfileKey;
         private boolean mIsNetworkRequest;
         private boolean mIsTargetingNewNetworks = false;
+        @NonNull private UserHandle mConfigOwner;
 
         /**
-         * Creates a StandardWifiEntryKey matching a ScanResultKey
+         * Base StandardWifiEntryKey constructor.
+         *
+         * @param scanResultKey          key to match ScanResults against.
+         * @param isTargetingNewNetworks Whether this entry should represent an unsaved entry
+         *                               waiting to be configured by the user. This is necessary to
+         *                               ignore existing WifiConfigurations that match the security
+         *                               type family, but have no scan results.
+         * @param configOwner            Owner of the target WifiConfiguration. This should be the
+         *                               current user if the entry is not saved yet.
          */
-        StandardWifiEntryKey(@NonNull ScanResultKey scanResultKey) {
-            this(scanResultKey, false /* isTargetingNewNetworks */);
+        StandardWifiEntryKey(@NonNull ScanResultKey scanResultKey, boolean isTargetingNewNetworks,
+                @NonNull UserHandle configOwner) {
+            mScanResultKey = scanResultKey;
+            mIsTargetingNewNetworks = isTargetingNewNetworks;
+            mConfigOwner = configOwner;
         }
 
         /**
-         * Creates a StandardWifiEntryKey matching a ScanResultKey and sets whether the entry
-         * should target new networks or not.
+         * Base StandardWifiEntryKey constructor targeting the current user.
+         *
+         * @param scanResultKey          key to match ScanResults against.
+         * @param isTargetingNewNetworks Whether this entry should represent an unsaved entry
+         *                               waiting to be configured by the user. This is necessary to
+         *                               ignore existing WifiConfigurations that match the security
+         *                               type family, but have no scan results.
          */
         StandardWifiEntryKey(@NonNull ScanResultKey scanResultKey, boolean isTargetingNewNetworks) {
-            mScanResultKey = scanResultKey;
-            mIsTargetingNewNetworks = isTargetingNewNetworks;
+            this(scanResultKey, isTargetingNewNetworks, UserHandle.of(
+                    ActivityManager.getCurrentUser()));
         }
 
         /**
@@ -1098,6 +1234,7 @@ public class StandardWifiEntry extends WifiEntry {
                 mIsNetworkRequest = true;
             }
             mIsTargetingNewNetworks = isTargetingNewNetworks;
+            mConfigOwner = UserHandle.getUserHandleForUid(config.creatorUid);
         }
 
         /**
@@ -1124,6 +1261,11 @@ public class StandardWifiEntry extends WifiEntry {
                     mIsTargetingNewNetworks = keyJson.getBoolean(
                             KEY_IS_TARGETING_NEW_NETWORKS);
                 }
+                if (keyJson.has(KEY_CONFIG_OWNER)) {
+                    mConfigOwner = UserHandle.of(keyJson.getInt(KEY_CONFIG_OWNER));
+                } else {
+                    mConfigOwner = UserHandle.of(ActivityManager.getCurrentUser());
+                }
             } catch (JSONException e) {
                 Log.e(TAG, "JSONException while converting StandardWifiEntryKey to string: " + e);
             }
@@ -1148,6 +1290,7 @@ public class StandardWifiEntry extends WifiEntry {
                 if (mIsTargetingNewNetworks) {
                     keyJson.put(KEY_IS_TARGETING_NEW_NETWORKS, mIsTargetingNewNetworks);
                 }
+                keyJson.put(KEY_CONFIG_OWNER, mConfigOwner.getIdentifier());
             } catch (JSONException e) {
                 Log.wtf(TAG, "JSONException while converting StandardWifiEntryKey to string: " + e);
             }
@@ -1173,6 +1316,10 @@ public class StandardWifiEntry extends WifiEntry {
             return mIsTargetingNewNetworks;
         }
 
+        @NonNull UserHandle getConfigOwner() {
+            return mConfigOwner;
+        }
+
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
@@ -1180,12 +1327,14 @@ public class StandardWifiEntry extends WifiEntry {
             StandardWifiEntryKey that = (StandardWifiEntryKey) o;
             return Objects.equals(mScanResultKey, that.mScanResultKey)
                     && TextUtils.equals(mSuggestionProfileKey, that.mSuggestionProfileKey)
-                    && mIsNetworkRequest == that.mIsNetworkRequest;
+                    && mIsNetworkRequest == that.mIsNetworkRequest
+                    && Objects.equals(mConfigOwner, that.mConfigOwner);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(mScanResultKey, mSuggestionProfileKey, mIsNetworkRequest);
+            return Objects.hash(mScanResultKey, mSuggestionProfileKey, mIsNetworkRequest,
+                    mConfigOwner);
         }
     }
 
